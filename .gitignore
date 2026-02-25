@@ -1,0 +1,31 @@
+# OS / Editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.tmp
+.idea/
+.vscode/
+*.code-workspace
+
+# Logs
+*.log
+
+# Env files / secrets
+.env
+.env.*
+!.env.example
+
+# Archives / binaries
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+
+# Build / output
+dist/
+build/
+out/
+
+# Unknown language: add your own ignores here

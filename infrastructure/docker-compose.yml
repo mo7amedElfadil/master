@@ -1,0 +1,122 @@
+# Development Environment
+# Customize services for your stack. This template shows a typical setup.
+
+services:
+  # ============================================================
+  # Backend API
+  # ============================================================
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://<user>:<pass>@db:5432/<dbname>
+      - REDIS_URL=redis://redis:6379
+      # Add your environment variables here
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ./backend:/app # Hot reload
+      - ./.env:/app/.env:ro # Env file
+    # Customize the command for your backend:
+    # Python/FastAPI:
+    # command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    # Node.js/Express:
+    # command: npm run dev
+    # Go:
+    # command: air  # or: go run main.go
+
+    # ============================================================
+    # Frontend
+    # ============================================================
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+      - VITE_WS_URL=ws://localhost:8000
+    depends_on:
+      - api
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules # Prevent host node_modules from overwriting
+    # command: npm run dev -- --host 0.0.0.0 --port 3000
+
+    # ============================================================
+    # Database
+    # ============================================================
+    # PostgreSQL (or TimescaleDB, MySQL, etc.)
+  db:
+    image: postgres:16-alpine
+    # For TimescaleDB, use: image: timescale/timescaledb:latest-pg16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: <user>
+      POSTGRES_PASSWORD: <pass>
+      POSTGRES_DB: <dbname>
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U <user>" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ============================================================
+  # Cache / Message Broker
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+  # ============================================================
+  # Additional Services (uncomment as needed)
+  # ============================================================
+
+  ## MQTT Broker (for IoT/event-driven projects)
+  # mqtt:
+  #   image: eclipse-mosquitto:2
+  #   ports:
+  #     - "1883:1883"
+  #   volumes:
+  #     - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+
+  ## Object Storage (S3-compatible)
+  # minio:
+  #   image: minio/minio:latest
+  #   ports:
+  #     - "9000:9000"
+  #     - "9001:9001"
+  #   environment:
+  #     MINIO_ROOT_USER: minioadmin
+  #     MINIO_ROOT_PASSWORD: minioadmin
+  #   command: server /data --console-address ":9001"
+  #   volumes:
+  #     - miniodata:/data
+
+  ## Background Worker (Celery, Bull, etc.)
+  # worker:
+  #   build:
+  #     context: ./backend
+  #     dockerfile: Dockerfile
+  #   command: celery -A app.worker worker --loglevel=info
+  #   depends_on:
+  #     - redis
+  #     - db
+  #   volumes:
+  #     - ./backend:/app
+
+volumes:
+  pgdata:
+  redisdata: # miniodata:

@@ -1,0 +1,202 @@
+name: Deploy to Production
+
+# DUAL DEPLOYMENT STRATEGY
+# ========================
+# Strategy 1: Cloud VPS  — GitHub-hosted runners + SSH (active by default)
+# Strategy 2: Self-Hosted — Private GitHub runners + local SSH (commented)
+#
+# Choose ONE deploy job. Delete or comment the other.
+#
+# Required GitHub Secrets (Cloud VPS):
+#   SSH_HOST         — Server IP or hostname
+#   SSH_USER         — SSH username (e.g., ubuntu)
+#   SSH_PRIVATE_KEY  — Private SSH key
+#   PROD_ENV_FILE    — Full production .env file contents
+#
+# Required GitHub Secrets (Self-Hosted):
+#   PROD_ENV_FILE    — Full production .env file contents
+#   (HOST/USER are hardcoded in the workflow env section)
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ============================================================
+  # Build & Push (shared by both strategies)
+  # ============================================================
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          version: latest
+
+      - name: Build and push with Docker Bake
+        uses: docker/bake-action@v6
+        with:
+          files: |
+            ./docker-bake.hcl
+          push: true
+          set: |
+            *.cache-from=type=gha
+            *.cache-to=type=gha,mode=max
+
+  # ============================================================
+  # STRATEGY 1: Cloud VPS Deployment (GitHub-hosted runner + SSH)
+  # ============================================================
+  # Uses GitHub-hosted ubuntu runner to SSH into a remote cloud server.
+  # Works with: DigitalOcean, AWS EC2, Linode, Hetzner, Azure VM, etc.
+
+  deploy-cloud-vps:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment: production    # Enable GitHub Environment approval gates
+
+    env:
+      DEPLOY_PATH: /opt/${{ github.event.repository.name }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install SSH key
+        uses: shimataro/ssh-key-action@v2
+        with:
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          known_hosts: unnecessary
+          if_key_exists: replace
+
+      - name: Add known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Create remote directory
+        run: |
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
+            "sudo mkdir -p $DEPLOY_PATH && sudo chown -R ${{ secrets.SSH_USER }}:${{ secrets.SSH_USER }} $DEPLOY_PATH"
+
+      - name: Copy configuration files
+        run: |
+          scp docker-compose.prod.yml ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:$DEPLOY_PATH/docker-compose.yml
+
+          # Copy nginx config (uncomment if using nginx reverse proxy)
+          # scp nginx/default.conf ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:$DEPLOY_PATH/nginx/default.conf
+          # scp nginx/default.conf.ssl ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:$DEPLOY_PATH/nginx/default.conf.ssl
+
+      - name: Write .env file
+        run: |
+          echo "${{ secrets.PROD_ENV_FILE }}" > .env.prod
+          scp .env.prod ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:$DEPLOY_PATH/.env
+          rm .env.prod
+
+      - name: Deploy
+        run: |
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "bash -s" <<'EOF'
+          set -euo pipefail
+          cd ${{ env.DEPLOY_PATH }}
+
+          # SSL auto-detection: swap nginx config if certs exist
+          # if [ -f nginx/certs/fullchain.pem ]; then
+          #   echo "SSL certificates detected, activating SSL config..."
+          #   cp nginx/default.conf.ssl nginx/default.conf
+          # fi
+
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+          docker compose pull
+          docker compose up -d --force-recreate
+
+          # Wait for database
+          echo "Waiting for database..."
+          sleep 10
+
+          # Run migrations (uncomment for your stack)
+          # docker compose exec -T api alembic upgrade head
+          # docker compose exec -T api npx prisma migrate deploy
+
+          docker system prune -f
+          EOF
+
+  # ============================================================
+  # STRATEGY 2: Self-Hosted Runner Deployment (private runner + LAN SSH)
+  # ============================================================
+  # Uses a private GitHub Actions runner on your local network.
+  # The runner has direct network access to the deployment target.
+  # Works with: on-prem servers, lab environments, internal infra.
+  #
+  # Setup:
+  #   1. Install a GitHub Actions runner on your network
+  #   2. Label it with: self-hosted, deploy
+  #   3. Create SSH key pair for runner -> target server
+  #   4. Set HOST and USER in env section below
+
+  # deploy-self-hosted:
+  #   needs: build-and-push
+  #   runs-on: [self-hosted, deploy]        # Your runner labels
+  #   environment: production
+  #
+  #   env:
+  #     HOST: 10.10.10.100                   # Internal IP of target
+  #     USER: ubuntu                          # SSH user on target
+  #     DEPLOY_PATH: /opt/${{ github.event.repository.name }}
+  #
+  #   steps:
+  #     - name: Checkout repository
+  #       uses: actions/checkout@v4
+  #
+  #     - name: Create remote directory
+  #       run: |
+  #         ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new $USER@$HOST \
+  #           "sudo mkdir -p $DEPLOY_PATH && sudo chown -R $USER:$USER $DEPLOY_PATH"
+  #
+  #     - name: Copy configuration files
+  #       run: |
+  #         scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new \
+  #           docker-compose.prod.yml $USER@$HOST:$DEPLOY_PATH/docker-compose.yml
+  #
+  #     - name: Write .env file
+  #       run: |
+  #         echo "${{ secrets.PROD_ENV_FILE }}" > .env.prod
+  #         scp -i ~/.ssh/deploy_key .env.prod $USER@$HOST:$DEPLOY_PATH/.env
+  #         rm .env.prod
+  #
+  #     - name: Deploy
+  #       run: |
+  #         ssh -i ~/.ssh/deploy_key $USER@$HOST "bash -s" <<'EOF'
+  #         set -euo pipefail
+  #         cd ${{ env.DEPLOY_PATH }}
+  #
+  #         echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+  #
+  #         docker compose pull
+  #         docker compose up -d --force-recreate
+  #
+  #         sleep 10
+  #
+  #         # Run migrations
+  #         # docker compose exec -T api alembic upgrade head
+  #
+  #         docker system prune -f
+  #         EOF
